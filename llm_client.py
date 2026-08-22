@@ -3,7 +3,7 @@ import requests
 
 
 class DeepSeekClient:
-    """DeepSeek API 客户端，支持流式输出。"""
+    """DeepSeek API 客户端，支持流式输出 + 多轮对话。"""
 
     BASE_URL = "https://api.deepseek.com"
     MODEL = "deepseek-v4-pro"
@@ -18,7 +18,9 @@ class DeepSeekClient:
         "4. 若知识库中确实没有相关信息，请说明「知识库中暂无相关内容」\n"
         "5. 回答要简洁、准确、条理清晰\n"
         "6. 涉及尺码、价格等具体数据时，请清晰列出\n"
-        "7. 使用中文回答\n\n"
+        "7. 使用中文回答\n"
+        "8. 这是多轮对话，用户的问题可能引用上文（如「这个多少钱」「那个有什么颜色」），"
+        "请结合对话历史理解用户意图\n\n"
         "知识库检索结果：\n{context}"
     )
 
@@ -33,26 +35,39 @@ class DeepSeekClient:
         self.api_key = api_key
 
     def _translate_error(self, error_msg):
-        """将英文 API 错误信息翻译为中文。"""
         lower = error_msg.lower()
         for en, zh in self.ERROR_TRANSLATIONS.items():
             if en in lower:
                 return zh
         return error_msg
 
-    def _build_messages(self, question, context_chunks):
+    def _build_messages(self, question, context_chunks, history=None):
+        """构建多轮对话消息列表。"""
         context = "\n\n---\n\n".join(
             f"[来源: {c['source']}] {c['text']}" for c in context_chunks
         )
         system_content = self.SYSTEM_PROMPT.format(context=context)
-        return [
-            {"role": "system", "content": system_content},
-            {"role": "user", "content": question},
-        ]
 
-    def chat_stream(self, question, context_chunks):
-        """流式调用，逐块 yield 文本。遇到错误时 yield __ERROR__: 前缀。"""
-        messages = self._build_messages(question, context_chunks)
+        messages = [{"role": "system", "content": system_content}]
+
+        # 添加对话历史
+        if history:
+            for msg in history:
+                content = msg.get("content", "")
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                messages.append({
+                    "role": msg["role"],
+                    "content": content,
+                })
+
+        # 当前问题
+        messages.append({"role": "user", "content": question})
+        return messages
+
+    def chat_stream(self, question, context_chunks, history=None):
+        """流式调用，逐块 yield 文本。支持多轮对话。"""
+        messages = self._build_messages(question, context_chunks, history)
 
         try:
             response = requests.post(

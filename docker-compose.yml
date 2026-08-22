@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: ecommerce-rag
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./data:/app/data
+      - ./index:/app/index
+      - ./config.json:/app/config.json
+    environment:
+      - HF_ENDPOINT=https://hf-mirror.com
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:5000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3

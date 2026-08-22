@@ -7,6 +7,9 @@ __pycache__/
 # 敏感配置（含 API Key）
 config.json
 
+# 索引目录（运行时生成）
+index/
+
 # 虚拟环境
 venv/
 .venv/
@@ -14,3 +17,6 @@ venv/
 # IDE
 .vscode/
 .idea/
+
+# Docker
+*.log

@@ -13,6 +13,32 @@ const apiKeyInput = document.getElementById("api-key-input");
 const saveKeyBtn = document.getElementById("save-key-btn");
 const llmStatus = document.getElementById("llm-status");
 
+// ═══ Session 管理 ═══
+
+let sessionId = null;
+
+async function initSession() {
+    const stored = localStorage.getItem("session_id");
+    if (stored) {
+        sessionId = stored;
+        return;
+    }
+    try {
+        const res = await fetch("/api/session");
+        const data = await res.json();
+        sessionId = data.session_id;
+        localStorage.setItem("session_id", sessionId);
+    } catch (err) {
+        console.error("创建会话失败:", err);
+    }
+}
+
+function clearSession() {
+    localStorage.removeItem("session_id");
+    sessionId = null;
+    initSession();
+}
+
 // ═══ 工具函数 ═══
 
 function formatSize(bytes) {
@@ -169,7 +195,7 @@ async function sendMessage() {
         const res = await fetch("/api/query", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ question: question, top_k: 5 }),
+            body: JSON.stringify({ question: question, top_k: 5, session_id: sessionId || "" }),
         });
 
         const contentType = res.headers.get("content-type") || "";
@@ -437,6 +463,7 @@ async function loadStats() {
 
 // ═══ 初始化 ═══
 
+initSession();
 loadSettings();
 loadDocuments();
 loadStats();

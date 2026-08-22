@@ -4,3 +4,5 @@ jieba>=0.42
 numpy>=1.26
 requests>=2.31
 python-docx>=1.1
+sentence-transformers>=2.7
+gunicorn>=22.0

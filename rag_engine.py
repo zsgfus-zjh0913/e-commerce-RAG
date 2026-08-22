@@ -1,7 +1,17 @@
 import os
+import sys
 import json
 import csv
 import re
+import hashlib
+
+# Windows 短路径库（绕过路径长度限制安装的 torch/sentence-transformers）
+_rag_libs = os.environ.get("RAG_LIBS_PATH", r"C:\rag_libs")
+if os.path.isdir(_rag_libs):
+    import site
+    site.addsitedir(_rag_libs)
+    if _rag_libs not in sys.path:
+        sys.path.append(_rag_libs)
 from pathlib import Path
 from docx import Document
 
@@ -10,45 +20,125 @@ import numpy as np
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# 电商领域自定义词典
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
 CUSTOM_WORDS = [
     "尺码", "型号", "面料", "材质", "商品编号", "库存",
     "包邮", "退换货", "售后服务", "发货时间", "产地",
     "男装", "女装", "童装", "鞋类", "配饰", "电子产品",
     "家居用品", "食品", "美妆", "运动户外",
+    "蓝牙耳机", "无线耳机", "声科达", "SC-505",
+    "T恤", "卫衣", "冲锋衣", "连衣裙", "牛仔裤",
+    "胸围", "腰围", "臀围", "肩宽", "衣长", "袖长",
 ]
 
 for w in CUSTOM_WORDS:
     jieba.add_word(w)
 
+SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".docx"}
+EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+
 
 def tokenize(text):
-    """jieba 分词，返回空格分隔的词串。"""
-    words = jieba.cut(text)
-    return " ".join(w.strip() for w in words if w.strip())
+    return " ".join(w.strip() for w in jieba.cut(text) if w.strip())
 
 
 class RAGEngine:
-    """基于 TF-IDF + 余弦相似度的轻量 RAG 检索引擎。"""
+    """混合检索引擎：向量语义检索 + TF-IDF 关键词检索 + 持久化索引。"""
 
-    def __init__(self, data_dir="data"):
+    def __init__(self, data_dir="data", index_dir="index"):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.chunks = []          # [{"text":..., "source":..., "meta":...}]
+        self.index_dir = Path(index_dir)
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+
+        self._encoder = None
+        self._mode = "unknown"
+        self.chunks = []
+        self.embeddings = None
         self.vectorizer = None
         self.tfidf_matrix = None
-        self._rebuild()
+
+        self._load_or_build_index()
+
+    # ── 嵌入模型 ─────────────────────────────────────────
+
+    @property
+    def encoder(self):
+        if self._encoder is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                print(f"[RAG] 加载嵌入模型 {EMBEDDING_MODEL} ...")
+                self._encoder = SentenceTransformer(EMBEDDING_MODEL)
+                self._mode = "vector"
+                print("[RAG] 向量检索模式已启用")
+            except Exception as e:
+                print(f"[RAG] 嵌入模型加载失败: {e}")
+                print("[RAG] 回退到 TF-IDF 模式")
+                self._mode = "tfidf"
+        return self._encoder
+
+    # ── 持久化索引 ───────────────────────────────────────
+
+    def _load_or_build_index(self):
+        emb_path = self.index_dir / "embeddings.npy"
+        chunks_path = self.index_dir / "chunks.json"
+        hashes_path = self.index_dir / "doc_hashes.json"
+
+        if chunks_path.exists():
+            self.chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
+            if emb_path.exists() and self.embeddings is None:
+                self.embeddings = np.load(str(emb_path))
+                self._mode = "vector"
+            print(f"[RAG] 从磁盘加载索引: {len(self.chunks)} chunks")
+
+            if self._data_changed(hashes_path):
+                print("[RAG] 检测到数据变更，重建索引...")
+                self._rebuild()
+            elif self.embeddings is None and self.encoder is not None:
+                print("[RAG] 索引缺少向量嵌入，重建中...")
+                self._rebuild()
+            else:
+                if self._mode != "vector":
+                    self._mode = "tfidf"
+                self._build_tfidf()
+        else:
+            print("[RAG] 首次运行，构建索引...")
+            self._rebuild()
+
+    def _data_changed(self, hashes_path):
+        if not hashes_path.exists():
+            return True
+        old = json.loads(hashes_path.read_text(encoding="utf-8"))
+        current = self._compute_doc_hashes()
+        return old != current
+
+    def _compute_doc_hashes(self):
+        hashes = {}
+        for f in sorted(self.data_dir.iterdir()):
+            if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS:
+                hashes[f.name] = hashlib.md5(f.read_bytes()).hexdigest()
+        return hashes
+
+    def _save_index(self):
+        if self.embeddings is not None:
+            np.save(str(self.index_dir / "embeddings.npy"), self.embeddings)
+        (self.index_dir / "chunks.json").write_text(
+            json.dumps(self.chunks, ensure_ascii=False), encoding="utf-8"
+        )
+        (self.index_dir / "doc_hashes.json").write_text(
+            json.dumps(self._compute_doc_hashes(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
 
     # ── 文档加载 ──────────────────────────────────────────
 
     def _load_file(self, filepath):
-        """读取单个文件，返回 (text, meta) 列表。"""
         ext = filepath.suffix.lower()
         results = []
 
         if ext in (".txt", ".md"):
-            with open(filepath, "r", encoding="utf-8") as f:
-                text = f.read()
+            text = filepath.read_text(encoding="utf-8")
             results.append((text, {"source": filepath.name, "type": "text"}))
 
         elif ext == ".csv":
@@ -61,8 +151,7 @@ class RAGEngine:
                     }))
 
         elif ext == ".json":
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = json.loads(filepath.read_text(encoding="utf-8"))
             if isinstance(data, list):
                 for i, item in enumerate(data):
                     text = self._json_to_text(item)
@@ -94,7 +183,6 @@ class RAGEngine:
 
     @staticmethod
     def _json_to_text(obj, prefix=""):
-        """将 JSON 对象转为可读文本。"""
         lines = []
         if isinstance(obj, dict):
             for k, v in obj.items():
@@ -113,73 +201,120 @@ class RAGEngine:
         return "；".join(lines)
 
     def _split_chunks(self, text, source, meta, max_len=300):
-        """将长文本按段落切分为 chunk。"""
         paragraphs = re.split(r'\n\s*\n', text.strip())
         chunks = []
         for para in paragraphs:
             para = para.strip()
             if not para:
                 continue
-            # 长段落再切分
             while len(para) > max_len:
                 cut = para[:max_len]
-                # 尽量在句号/分号处断
-                for sep in ['。', '；', '!', '?', '；', '\n']:
+                for sep in ['。', '；', '!', '?', '\n']:
                     pos = cut.rfind(sep)
                     if pos > max_len // 2:
                         cut = para[:pos + 1]
                         break
-                chunks.append(cut)
+                chunk_meta = dict(meta)
+                chunk_meta["source"] = source
+                chunks.append({"text": cut, "source": source, "meta": chunk_meta})
                 para = para[len(cut):]
             if para:
                 chunk_meta = dict(meta)
                 chunk_meta["source"] = source
-                chunk_meta["preview"] = para[:80]
-                chunks.append({
-                    "text": para,
-                    "source": source,
-                    "meta": chunk_meta,
-                })
+                chunks.append({"text": para, "source": source, "meta": chunk_meta})
         return chunks
 
     # ── 索引构建 ──────────────────────────────────────────
 
     def _rebuild(self):
-        """重新加载所有文件并构建 TF-IDF 索引。"""
         self.chunks = []
-        supported = {".txt", ".md", ".csv", ".json", ".docx"}
-
         for filepath in sorted(self.data_dir.iterdir()):
-            if filepath.is_file() and filepath.suffix.lower() in supported:
+            if filepath.is_file() and filepath.suffix.lower() in SUPPORTED_EXTENSIONS:
                 try:
                     docs = self._load_file(filepath)
                     for text, meta in docs:
-                        new_chunks = self._split_chunks(
-                            text, filepath.name, meta
+                        self.chunks.extend(
+                            self._split_chunks(text, filepath.name, meta)
                         )
-                        self.chunks.extend(new_chunks)
                 except Exception as e:
                     print(f"[RAG] 加载 {filepath.name} 失败: {e}")
 
         if not self.chunks:
+            print("[RAG] 数据目录无可用文档")
+            self.embeddings = None
             self.vectorizer = None
             self.tfidf_matrix = None
-            print("[RAG] 数据目录无可用文档")
+            self._save_index()
             return
 
+        # 向量嵌入
+        if self.encoder is not None:
+            texts = [c["text"] for c in self.chunks]
+            self.embeddings = self.encoder.encode(
+                texts, show_progress_bar=True, normalize_embeddings=True
+            )
+        else:
+            self.embeddings = None
+
+        # TF-IDF 辅助索引
+        self._build_tfidf()
+        self._save_index()
+        print(f"[RAG] 索引构建完成: {len(self.chunks)} chunks, 模式={self._mode}")
+
+    def _build_tfidf(self):
+        if not self.chunks:
+            self.vectorizer = None
+            self.tfidf_matrix = None
+            return
         corpus = [tokenize(c["text"]) for c in self.chunks]
         self.vectorizer = TfidfVectorizer(ngram_range=(1, 2))
         self.tfidf_matrix = self.vectorizer.fit_transform(corpus)
-        print(f"[RAG] 索引构建完成，共 {len(self.chunks)} 个文本块")
 
-    # ── 检索 ──────────────────────────────────────────────
+    def _add_chunks(self, new_chunks):
+        """增量添加 chunks 到索引。"""
+        if not new_chunks:
+            return
+
+        old_len = len(self.chunks)
+        self.chunks.extend(new_chunks)
+
+        # 增量嵌入
+        if self.encoder is not None:
+            texts = [c["text"] for c in new_chunks]
+            new_emb = self.encoder.encode(
+                texts, show_progress_bar=False, normalize_embeddings=True
+            )
+            if self.embeddings is not None and len(self.embeddings) > 0:
+                self.embeddings = np.vstack([self.embeddings, new_emb])
+            else:
+                self.embeddings = new_emb
+
+        # 重建 TF-IDF（轻量操作）
+        self._build_tfidf()
+        self._save_index()
+        print(f"[RAG] 增量添加 {len(new_chunks)} chunks (总计 {len(self.chunks)})")
+
+    def _remove_chunks_by_source(self, source):
+        """删除指定来源的所有 chunks。"""
+        old_len = len(self.chunks)
+        keep_mask = [c["source"] != source for c in self.chunks]
+        self.chunks = [c for i, c in enumerate(self.chunks) if keep_mask[i]]
+
+        if self.embeddings is not None and len(self.embeddings) > 0:
+            self.embeddings = self.embeddings[keep_mask]
+
+        removed = old_len - len(self.chunks)
+        if removed > 0:
+            self._build_tfidf()
+            self._save_index()
+            print(f"[RAG] 删除 {removed} chunks (剩余 {len(self.chunks)})")
+        return removed > 0
+
+    # ── 查询扩展 ─────────────────────────────────────────
 
     @staticmethod
     def _expand_query(query):
-        """扩展口语化查询，补充正式术语以提升 TF-IDF 命中率。"""
         expansions = []
-
-        # 中文身高 → 厘米数字（一米八 → 180）
         height_map = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5",
                       "六": "6", "七": "7", "八": "8", "九": "9"}
         for m in re.finditer(r"一米(.)", query):
@@ -187,7 +322,6 @@ class RAGEngine:
             if digit:
                 expansions.append(f"1{digit}0")
 
-        # 口语词 → 文档中的正式术语
         term_map = {
             "男士": ["男装", "男"],
             "女士": ["女装", "女"],
@@ -215,16 +349,38 @@ class RAGEngine:
             return query + " " + " ".join(set(expansions))
         return query
 
-    def query(self, question, top_k=5, threshold=0.05):
-        """检索与问题最相关的文本块。"""
-        if self.vectorizer is None or not self.chunks:
+    # ── 检索 ──────────────────────────────────────────────
+
+    def query(self, question, top_k=5, threshold=0.0):
+        if not self.chunks:
             return []
 
         expanded = self._expand_query(question)
-        q_vec = self.vectorizer.transform([tokenize(expanded)])
-        scores = cosine_similarity(q_vec, self.tfidf_matrix).flatten()
 
-        # 排序取 top_k
+        # 向量检索
+        vec_scores = None
+        if self.encoder is not None and self.embeddings is not None:
+            q_emb = self.encoder.encode(
+                [expanded], normalize_embeddings=True
+            )
+            vec_scores = (self.embeddings @ q_emb.T).flatten()
+
+        # TF-IDF 检索
+        tfidf_scores = None
+        if self.vectorizer is not None:
+            q_vec = self.vectorizer.transform([tokenize(expanded)])
+            tfidf_scores = cosine_similarity(q_vec, self.tfidf_matrix).flatten()
+
+        # 混合评分
+        if vec_scores is not None and tfidf_scores is not None:
+            scores = 0.7 * vec_scores + 0.3 * tfidf_scores
+        elif vec_scores is not None:
+            scores = vec_scores
+        elif tfidf_scores is not None:
+            scores = tfidf_scores
+        else:
+            return []
+
         ranked = np.argsort(scores)[::-1]
         results = []
         for idx in ranked[:top_k]:
@@ -243,11 +399,9 @@ class RAGEngine:
     # ── 文档管理 ──────────────────────────────────────────
 
     def list_documents(self):
-        """列出 data 目录中的所有文档。"""
         docs = []
-        supported = {".txt", ".md", ".csv", ".json", ".docx"}
         for filepath in sorted(self.data_dir.iterdir()):
-            if filepath.is_file() and filepath.suffix.lower() in supported:
+            if filepath.is_file() and filepath.suffix.lower() in SUPPORTED_EXTENSIONS:
                 stat = filepath.stat()
                 docs.append({
                     "name": filepath.name,
@@ -257,25 +411,34 @@ class RAGEngine:
         return docs
 
     def add_document(self, filename, content_bytes):
-        """保存上传的文档并重建索引。"""
         filepath = self.data_dir / filename
-        with open(filepath, "wb") as f:
-            f.write(content_bytes)
-        self._rebuild()
+        filepath.write_bytes(content_bytes)
+
+        # 增量索引
+        try:
+            docs = self._load_file(filepath)
+            new_chunks = []
+            for text, meta in docs:
+                new_chunks.extend(
+                    self._split_chunks(text, filepath.name, meta)
+                )
+            self._add_chunks(new_chunks)
+        except Exception as e:
+            print(f"[RAG] 增量索引失败，全量重建: {e}")
+            self._rebuild()
         return filepath.name
 
     def delete_document(self, filename):
-        """删除文档并重建索引。"""
         filepath = self.data_dir / filename
         if filepath.exists() and filepath.is_file():
             filepath.unlink()
-            self._rebuild()
-            return True
+            return self._remove_chunks_by_source(filename)
         return False
 
     def get_stats(self):
-        """返回引擎统计信息。"""
         return {
             "total_chunks": len(self.chunks),
             "total_documents": len(self.list_documents()),
+            "mode": self._mode if self._mode != "unknown" else "tfidf",
+            "index_persisted": (self.index_dir / "chunks.json").exists(),
         }
