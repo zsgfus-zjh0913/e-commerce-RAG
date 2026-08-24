@@ -22,8 +22,9 @@ CONFIG_FILE = BASE_DIR / "config.json"
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".docx"}
 
 rag = RAGEngine(str(DATA_DIR), str(INDEX_DIR))
-# 预加载嵌入模型（避免首次查询等待）
+# 预加载嵌入模型和重排序模型（避免首次查询等待）
 _ = rag.encoder
+_ = rag.reranker
 
 # ── Session 管理 ───────────────────────────────────────
 

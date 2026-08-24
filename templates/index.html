@@ -2,24 +2,27 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>电商 RAG 知识库系统</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>贴心助手 · 商品知识库</title>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
 <div id="app">
+    <!-- 侧边栏遮罩（移动端） -->
+    <div id="sidebar-overlay" class="sidebar-overlay"></div>
+
     <!-- 侧边栏 -->
     <aside id="sidebar">
         <div class="sidebar-header">
             <div class="logo">
-                <span class="logo-icon">🛍️</span>
-                <span class="logo-text">电商知识库</span>
+                <span class="logo-text">知识库管理</span>
+                <button id="sidebar-close" class="sidebar-close" aria-label="关闭">&times;</button>
             </div>
         </div>
 
-        <!-- AI 模型设置 -->
+        <!-- 模型设置 -->
         <div class="settings-section">
-            <h3 class="section-title">AI 模型设置</h3>
+            <h3 class="section-title">模型设置</h3>
             <div class="settings-row">
                 <span class="settings-label">模型</span>
                 <span class="settings-value">DeepSeek-V4-Pro</span>
@@ -30,12 +33,12 @@
             </div>
             <div class="api-key-input">
                 <input type="password" id="api-key-input" class="key-input"
-                       placeholder="输入 DeepSeek API Key..." autocomplete="off">
+                       placeholder="输入 API Key..." autocomplete="off">
                 <button id="save-key-btn" class="save-key-btn">保存</button>
             </div>
             <p class="settings-hint">
                 <a href="https://platform.deepseek.com/api_keys" target="_blank">获取 API Key</a>
-                 · 设置后启用 AI 回答
+                 · 设置后启用回答
             </p>
         </div>
 
@@ -44,7 +47,7 @@
             <h3 class="section-title">上传文档</h3>
             <div id="dropzone" class="dropzone">
                 <div class="dropzone-content">
-                    <span class="upload-icon">📤</span>
+                    <span class="upload-icon">&#128206;</span>
                     <p>拖拽文件到此处</p>
                     <p class="dropzone-hint">或点击选择文件</p>
                     <p class="dropzone-formats">支持 .txt .md .csv .json .docx</p>
@@ -77,17 +80,26 @@
     <!-- 主聊天区 -->
     <main id="main">
         <header class="chat-header">
-            <h1>电商智能问答系统</h1>
-            <p class="chat-subtitle">基于知识库的商品信息、尺码、FAQ 智能检索</p>
+            <button id="sidebar-toggle" class="sidebar-toggle" aria-label="菜单">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="3" y1="6" x2="21" y2="6"/>
+                    <line x1="3" y1="12" x2="21" y2="12"/>
+                    <line x1="3" y1="18" x2="21" y2="18"/>
+                </svg>
+            </button>
+            <div class="chat-header-text">
+                <h1>贴心助手</h1>
+                <p class="chat-subtitle">商品咨询 · 尺码查询 · 售后服务</p>
+            </div>
         </header>
 
         <div id="chat-messages" class="chat-messages">
             <!-- 欢迎消息 -->
             <div class="message bot-message">
-                <div class="message-avatar">🤖</div>
+                <div class="message-avatar">牛马</div>
                 <div class="message-content">
                     <div class="message-text">
-                        您好！我是电商智能问答助手。您可以问我关于<strong>商品信息</strong>、<strong>尺码规格</strong>、<strong>退换货政策</strong>等问题。
+                        您好，我是客服助手。您可以问我关于<strong>商品信息</strong>、<strong>尺码规格</strong>、<strong>退换货政策</strong>等问题。
                         <br><br>
                         <span class="example-hint">试试以下问题：</span>
                     </div>
@@ -108,13 +120,20 @@
                        placeholder="输入您的问题..." autocomplete="off">
                 <button id="send-btn" class="send-btn" onclick="sendMessage()">
                     <span>发送</span>
-                    <span class="send-icon">➤</span>
+                    <span class="send-icon">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="22" y1="2" x2="11" y2="13"/>
+                            <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+                        </svg>
+                    </span>
                 </button>
             </div>
         </div>
     </main>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
 <script src="/static/js/main.js"></script>
 </body>
 </html>

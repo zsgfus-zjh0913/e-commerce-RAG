@@ -37,6 +37,10 @@ for w in CUSTOM_WORDS:
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".docx"}
 EMBEDDING_MODEL = "BAAI/bge-small-zh-v1.5"
+RERANKER_MODEL = "BAAI/bge-reranker-base"
+
+CHUNK_MAX_LEN = 500
+CHUNK_OVERLAP = 100
 
 
 def tokenize(text):
@@ -53,6 +57,7 @@ class RAGEngine:
         self.index_dir.mkdir(parents=True, exist_ok=True)
 
         self._encoder = None
+        self._reranker = None
         self._mode = "unknown"
         self.chunks = []
         self.embeddings = None
@@ -77,6 +82,19 @@ class RAGEngine:
                 print("[RAG] 回退到 TF-IDF 模式")
                 self._mode = "tfidf"
         return self._encoder
+
+    @property
+    def reranker(self):
+        if self._reranker is None:
+            try:
+                from sentence_transformers import CrossEncoder
+                print(f"[RAG] 加载重排序模型 {RERANKER_MODEL} ...")
+                self._reranker = CrossEncoder(RERANKER_MODEL)
+                print("[RAG] 重排序模型已启用")
+            except Exception as e:
+                print(f"[RAG] 重排序模型加载失败: {e}")
+                print("[RAG] 跳过重排序，使用粗排结果")
+        return self._reranker
 
     # ── 持久化索引 ───────────────────────────────────────
 
@@ -200,28 +218,57 @@ class RAGEngine:
             lines.append(str(obj))
         return "；".join(lines)
 
-    def _split_chunks(self, text, source, meta, max_len=300):
+    def _split_chunks(self, text, source, meta, max_len=CHUNK_MAX_LEN, overlap=CHUNK_OVERLAP):
         paragraphs = re.split(r'\n\s*\n', text.strip())
         chunks = []
+        prev_tail = ""
+
         for para in paragraphs:
             para = para.strip()
             if not para:
                 continue
+
+            if prev_tail:
+                para = prev_tail + para
+                prev_tail = ""
+
+            if len(para) <= max_len:
+                chunk_meta = dict(meta)
+                chunk_meta["source"] = source
+                chunks.append({"text": para, "source": source, "meta": chunk_meta})
+                continue
+
             while len(para) > max_len:
                 cut = para[:max_len]
-                for sep in ['。', '；', '!', '?', '\n']:
+                best_sep = -1
+                for sep in ['。', '；', '！', '？', '\n', '；', '.', '!', '?']:
                     pos = cut.rfind(sep)
                     if pos > max_len // 2:
-                        cut = para[:pos + 1]
+                        best_sep = pos
                         break
+
+                if best_sep > 0:
+                    cut = para[:best_sep + 1]
+                else:
+                    best_space = cut.rfind(' ')
+                    if best_space > max_len // 2:
+                        cut = para[:best_space]
+
                 chunk_meta = dict(meta)
                 chunk_meta["source"] = source
                 chunks.append({"text": cut, "source": source, "meta": chunk_meta})
-                para = para[len(cut):]
+
+                if overlap > 0 and len(cut) > overlap:
+                    prev_tail = cut[-overlap:]
+                    para = cut[-overlap:] + para[len(cut):]
+                else:
+                    para = para[len(cut):]
+
             if para:
                 chunk_meta = dict(meta)
                 chunk_meta["source"] = source
                 chunks.append({"text": para, "source": source, "meta": chunk_meta})
+
         return chunks
 
     # ── 索引构建 ──────────────────────────────────────────
@@ -381,20 +428,39 @@ class RAGEngine:
         else:
             return []
 
+        # 粗排：取 top_k * 3 候选
+        candidate_k = min(top_k * 3, len(self.chunks))
         ranked = np.argsort(scores)[::-1]
-        results = []
-        for idx in ranked[:top_k]:
+        candidates = []
+        for idx in ranked[:candidate_k]:
             score = float(scores[idx])
             if score < threshold:
                 continue
             chunk = self.chunks[idx]
-            results.append({
+            candidates.append({
                 "text": chunk["text"],
                 "source": chunk["source"],
                 "score": round(score, 4),
                 "meta": chunk.get("meta", {}),
+                "index": int(idx),
             })
-        return results
+
+        if len(candidates) <= top_k:
+            return candidates
+
+        # 精排：用 Cross-Encoder 重排序
+        reranker = self.reranker
+        if reranker is not None:
+            try:
+                pairs = [[question, c["text"]] for c in candidates]
+                rerank_scores = reranker.predict(pairs)
+                for i, c in enumerate(candidates):
+                    c["rerank_score"] = float(rerank_scores[i])
+                candidates.sort(key=lambda x: x["rerank_score"], reverse=True)
+            except Exception as e:
+                print(f"[RAG] 重排序失败，使用粗排结果: {e}")
+
+        return candidates[:top_k]
 
     # ── 文档管理 ──────────────────────────────────────────
 
@@ -440,5 +506,8 @@ class RAGEngine:
             "total_chunks": len(self.chunks),
             "total_documents": len(self.list_documents()),
             "mode": self._mode if self._mode != "unknown" else "tfidf",
+            "reranker_enabled": self._reranker is not None,
+            "chunk_size": CHUNK_MAX_LEN,
+            "chunk_overlap": CHUNK_OVERLAP,
             "index_persisted": (self.index_dir / "chunks.json").exists(),
         }

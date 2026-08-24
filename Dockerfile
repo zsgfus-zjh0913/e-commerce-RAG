@@ -11,9 +11,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 预下载嵌入模型（加速启动）
+# 预下载嵌入模型和重排序模型（加速启动）
 ENV HF_ENDPOINT=https://hf-mirror.com
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('BAAI/bge-small-zh-v1.5')" || true
+RUN python -c "from sentence_transformers import CrossEncoder; CrossEncoder('BAAI/bge-reranker-base')" || true
 
 # 应用代码
 COPY . .

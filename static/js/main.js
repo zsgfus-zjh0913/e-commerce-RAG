@@ -12,6 +12,59 @@ const statChunks = document.getElementById("stat-chunks");
 const apiKeyInput = document.getElementById("api-key-input");
 const saveKeyBtn = document.getElementById("save-key-btn");
 const llmStatus = document.getElementById("llm-status");
+const sidebar = document.getElementById("sidebar");
+const sidebarToggle = document.getElementById("sidebar-toggle");
+const sidebarClose = document.getElementById("sidebar-close");
+const sidebarOverlay = document.getElementById("sidebar-overlay");
+
+// ═══ Markdown 渲染 ═══
+
+if (typeof marked !== "undefined") {
+    marked.setOptions({
+        breaks: true,
+        gfm: true,
+    });
+}
+
+function renderMarkdown(text) {
+    if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
+        const html = marked.parse(text);
+        return DOMPurify.sanitize(html);
+    }
+    const div = document.createElement("div");
+    div.textContent = text;
+    return div.innerHTML.replace(/\n/g, "<br>");
+}
+
+// ═══ 移动端侧边栏 ═══
+
+function openSidebar() {
+    sidebar.classList.add("open");
+    sidebarOverlay.classList.add("active");
+}
+
+function closeSidebar() {
+    sidebar.classList.remove("open");
+    sidebarOverlay.classList.remove("active");
+}
+
+sidebarToggle.addEventListener("click", () => {
+    if (window.innerWidth <= 768) {
+        openSidebar();
+    } else {
+        sidebar.classList.toggle("collapsed");
+    }
+});
+
+sidebarClose.addEventListener("click", () => {
+    if (window.innerWidth <= 768) {
+        closeSidebar();
+    } else {
+        sidebar.classList.add("collapsed");
+    }
+});
+
+sidebarOverlay.addEventListener("click", closeSidebar);
 
 // ═══ Session 管理 ═══
 
@@ -68,7 +121,7 @@ function escapeHtml(text) {
 function updateLlmStatus(enabled) {
     if (enabled) {
         llmStatus.className = "llm-status connected";
-        llmStatus.querySelector(".llm-text").textContent = "已连接 · AI 回答";
+        llmStatus.querySelector(".llm-text").textContent = "已连接";
     } else {
         llmStatus.className = "llm-status disconnected";
         llmStatus.querySelector(".llm-text").textContent = "未连接";
@@ -81,7 +134,6 @@ async function loadSettings() {
         const data = await res.json();
         updateLlmStatus(data.llm_enabled);
 
-        // 从 localStorage 恢复 API Key 显示（仅显示掩码）
         const savedKey = localStorage.getItem("deepseek_api_key");
         if (savedKey && data.llm_enabled) {
             apiKeyInput.value = savedKey;
@@ -109,7 +161,6 @@ async function saveApiKey() {
                 localStorage.removeItem("deepseek_api_key");
                 apiKeyInput.value = "";
             }
-            // 在聊天区显示状态变更提示
             addMessage("bot", data.message);
         }
     } catch (err) {
@@ -130,19 +181,20 @@ function addMessage(role, text, sources) {
 
     const avatar = document.createElement("div");
     avatar.className = "message-avatar";
-    avatar.textContent = role === "user" ? "👤" : "🤖";
+    avatar.textContent = role === "user" ? "你" : "牛马";
 
     const content = document.createElement("div");
     content.className = "message-content";
 
     const textDiv = document.createElement("div");
     textDiv.className = "message-text";
-    textDiv.innerHTML = escapeHtml(text).replace(/\n/g, "<br>");
+    textDiv.innerHTML = renderMarkdown(text);
     content.appendChild(textDiv);
 
     if (sources && sources.length > 0) {
         const sourcesDiv = document.createElement("div");
         sourcesDiv.className = "message-sources";
+        sourcesDiv.style.alignSelf = role === "user" ? "flex-end" : "flex-start";
         sources.forEach((s) => {
             const tag = document.createElement("span");
             tag.className = "source-tag";
@@ -166,7 +218,7 @@ function addTypingIndicator() {
 
     const avatar = document.createElement("div");
     avatar.className = "message-avatar";
-    avatar.textContent = "🤖";
+    avatar.textContent = "牛马";
 
     const indicator = document.createElement("div");
     indicator.className = "typing-indicator";
@@ -201,10 +253,8 @@ async function sendMessage() {
         const contentType = res.headers.get("content-type") || "";
 
         if (contentType.includes("text/event-stream")) {
-            // ── SSE 流式模式 ──
             await handleSSEResponse(res);
         } else {
-            // ── 纯检索 JSON 模式 ──
             addTypingIndicator();
             const data = await res.json();
             removeTypingIndicator();
@@ -224,7 +274,6 @@ async function sendMessage() {
 }
 
 async function handleSSEResponse(res) {
-    // 创建流式消息气泡
     const { content, textDiv } = addMessage("bot", "");
     textDiv.className = "message-text stream-cursor";
     let sources = [];
@@ -240,13 +289,11 @@ async function handleSSEResponse(res) {
 
         buffer += decoder.decode(value, { stream: true });
 
-        // SSE 事件以 \n\n 分隔
         let idx;
         while ((idx = buffer.indexOf("\n\n")) !== -1) {
             const rawEvent = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
 
-            // 提取 data: 行
             const lines = rawEvent.split("\n");
             for (const line of lines) {
                 if (!line.startsWith("data: ")) continue;
@@ -258,16 +305,15 @@ async function handleSSEResponse(res) {
                         sources = evt.data || [];
                     } else if (evt.type === "delta") {
                         fullText += evt.data;
-                        textDiv.innerHTML = escapeHtml(fullText).replace(/\n/g, "<br>");
+                        textDiv.innerHTML = renderMarkdown(fullText);
                         scrollToBottom();
                     } else if (evt.type === "error") {
                         textDiv.className = "message-text";
                         textDiv.innerHTML = "";
                         const errP = document.createElement("span");
                         errP.style.color = "var(--danger)";
-                        errP.textContent = "AI 错误：" + evt.data;
+                        errP.textContent = "错误：" + evt.data;
                         textDiv.appendChild(errP);
-                        // 回退提示
                         const tipP = document.createElement("div");
                         tipP.style.marginTop = "8px";
                         tipP.style.fontSize = "13px";
@@ -276,8 +322,7 @@ async function handleSSEResponse(res) {
                         textDiv.appendChild(tipP);
                     } else if (evt.type === "done") {
                         textDiv.className = "message-text";
-                        textDiv.innerHTML = escapeHtml(fullText).replace(/\n/g, "<br>");
-                        // 添加来源标签
+                        textDiv.innerHTML = renderMarkdown(fullText);
                         if (sources.length > 0) {
                             const sourcesDiv = document.createElement("div");
                             sourcesDiv.className = "message-sources";
@@ -298,10 +343,9 @@ async function handleSSEResponse(res) {
         }
     }
 
-    // 确保移除光标
     textDiv.className = "message-text";
     if (fullText) {
-        textDiv.innerHTML = escapeHtml(fullText).replace(/\n/g, "<br>");
+        textDiv.innerHTML = renderMarkdown(fullText);
     }
 }
 
@@ -310,7 +354,6 @@ function askExample(question) {
     sendMessage();
 }
 
-// 回车发送
 chatInput.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
